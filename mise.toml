@@ -1,0 +1,23 @@
+[tasks.up]
+description = "Store the GitHub token, create/start orca-box, expose Orca on the tailnet"
+run = [
+  # Stores the command, not the token: sbx re-runs `gh auth token` on the host when needed.
+  # `set` creates or updates, so re-running is fine. Service secrets are global by default.
+  "sbx secret set github --command 'gh auth token'",
+  "sbx env run --detach",
+  # Tailnet only (not the internet); persists across reboots. Port = sbxenv.yaml `ports:`.
+  "tailscale serve --bg --tcp 6769 tcp://localhost:6769",
+]
+
+[tasks.down]
+description = "Stop orca-box (kept; `mise run up` starts it again)"
+run = "sbx stop orca-box"
+
+[tasks.cleanup]
+description = "down + undo the rest of up: tailnet exposure and the GitHub secret"
+depends = ["down"]
+run = [
+  "tailscale serve --tcp=6769 off",
+  # Global secret: other sandboxes lose GitHub access too. Asks for confirmation.
+  "sbx secret rm github",
+]
