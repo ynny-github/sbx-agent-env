@@ -1,0 +1,64 @@
+# Docker Sandboxes environment: Orca headless server + Claude Code, with Docker inside.
+#
+# Keep this file OUTSIDE the directories it mounts: lifecycle/secret commands declared in
+# environment files run on the host, and an agent must not be able to rewrite them.
+#
+#   sbx env plan            # preview (check the `agent:` handle and granted capabilities)
+#   sbx env run --detach    # create + start; orca-ide serve comes up in the background
+#   grep -o 'orca://pair?code=[^"]*' data/orca-log/serve.log | tail -1   # pairing link
+#   sbx env rm              # remove the sandbox
+#
+# Requires sbx v0.47+ (kit v3 workloads, long-running@1).
+schemaVersion: "1"
+name: orca-box
+
+# The handle sbx derives for the local workload kit below. If `sbx env plan` reports a
+# different handle, use that value here.
+agent: orca-serve
+
+kits:
+  # This repository's workload: Docker-enabled shell + orca-ide serve as a startup service.
+  - ./orca-serve
+  - docker.io/docker/sbx-kit-claude-mixin@sha256:3f48689bba9185d1d0244061cc189574b6c249e918c7aa50c3357565646bc4b1
+
+# Primary workspace, mounted read/write at the same absolute path inside the sandbox.
+# Relative paths resolve against this file's directory.
+workspace: ./app
+
+# Host directories for the kit's host-mount@1 paths (orca-serve.yaml). Kept across
+# `sbx env rm`; the initialize hook below creates them before the first create.
+mounts:
+  /home/agent/.config/orca: ./data/orca-config
+  /home/agent/.orca: ./data/orca-home
+  /home/agent/.local/state/orca-serve: ./data/orca-log
+  /home/agent/work: ./data/work
+  /home/agent/orca: ./data/orca-worktrees
+
+# Pin the host side to the in-sandbox port (the pairing link advertises that port). Loopback
+# only; reach it from the tailnet with `tailscale serve --bg --tcp 6769 tcp://localhost:6769`.
+ports:
+  - sandbox: 6769
+    host: 6769
+
+# Approve stored credentials for the proxy (approval only; values live in `sbx secret`).
+bindings:
+  # Claude subscription via /login in the sandbox (claude mixin's credential@1 oauth).
+  # Without this the proxy logs "withheld OAuth token (no authorizing binding)" -> 401.
+  anthropic:
+    oauth:
+      domains:
+        - platform.claude.com
+        - api.anthropic.com
+  # GitHub token (sbx secret set -g github ...) for git/gh.
+  github:
+    apiKey:
+      domains:
+        - api.github.com
+        - github.com
+
+# sbx requires the `mounts:` host directories to exist; initialize runs on the host before
+# every `sbx env create`/`run`. orca-ide serve itself is started by the kit (orca-serve.yaml).
+lifecycle:
+  initialize:
+    - name: Create host mount directories
+      command: 'mkdir -p -m 700 data/orca-config data/orca-home data/orca-log && mkdir -p data/work data/orca-worktrees'
