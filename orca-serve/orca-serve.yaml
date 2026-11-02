@@ -1,0 +1,125 @@
+# syntax=docker/sandbox-kit:3
+#
+# Workload kit: a Docker-enabled shell sandbox with Orca's headless server (`orca-ide`).
+#
+# The server is started by the lifecycle@1 startup hook below on every sandbox boot
+# (create, stop/start, daemon restart), detached from boot.
+# long-running@1 keeps the sandbox up after the last session disconnects.
+schemaVersion: "3"
+displayName: Orca server
+description: >-
+  Docker-enabled shell sandbox (mise, git, fish) that runs Orca's headless server in
+  the background for pairing from the Orca desktop app.
+sourceUrl: https://github.com/stablyai/orca
+ 
+kind: workload
+version: "0.1.0"
+ 
+args:
+  port:
+    default: "6769"
+    pattern: '^[0-9]{2,5}$'
+    description: In-sandbox port orca-ide serve listens on (published on the same host port)
+  pairingAddress:
+    default: mac-mini.tail6ef25.ts.net
+    pattern: '^[A-Za-z0-9.:-]+$'
+    description: Host advertised in pairing links (the host's Tailscale name)
+ 
+capabilities:
+  # The host launches the login shell from the image config as the agent user.
+  - type: com.docker.sandbox/sbx@1
+ 
+  # Docker-in-sandbox: dockerd needs real privilege; the microVM is the boundary.
+  - type: com.docker.sandbox/privileged@1
+    description: Runs Docker Engine inside the sandbox for the agents' containers
+ 
+  # Keep the sandbox (and the background server) running with no session attached.
+  - type: com.docker.sandbox/long-running@1
+ 
+  # The Orca server's WebSocket/HTTP endpoint. The host side is pinned in sbxenv.yaml.
+  - type: com.docker.sandbox/port@1
+    description: Orca headless server
+    config:
+      name: orca
+      container: ${{ kit.args.port }}
+ 
+  # Orca state and code checkouts on host directories, so they survive `sbx rm`.
+  # sbxenv.yaml `mounts:` picks the host side (sbx's own location if unset).
+  - type: com.docker.sandbox/host-mount@1
+    description: Orca settings, database and keys
+    config:
+      path: /home/agent/.config/orca
+      mode: "0700"
+  - type: com.docker.sandbox/host-mount@1
+    description: Orca secret store
+    config:
+      path: /home/agent/.orca
+      mode: "0700"
+  - type: com.docker.sandbox/host-mount@1
+    description: orca-ide serve log (holds the pairing link)
+    config:
+      path: /home/agent/.local/state/orca-serve
+      mode: "0700"
+  - type: com.docker.sandbox/host-mount@1
+    description: Code checkouts
+    config:
+      path: /home/agent/work
+  - type: com.docker.sandbox/host-mount@1
+    description: Orca-created worktrees (Orca's default workspaceDir is ~/orca/workspaces)
+    config:
+      path: /home/agent/orca
+
+  # Blocklist style: all egress is allowed and unwanted hosts are added to `deny` (deny wins
+  # over allow). Self-contained even if the host's global sbx policy is not allow-all.
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - "**"
+        deny: []
+
+  # Start the server on every boot. The log holds the pairing secret (umask 077) and is
+  # truncated per boot so the newest orca://pair link is the only one. Hooks get
+  # SHELL=/bin/sh, and Orca opens its terminals with $SHELL, so set the agent's bash.
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      startup:
+        # Orca records the machine id in its locks (orcad.lock, .profile-state-access) and
+        # refuses a data root locked "from another machine". sbx gives every new sandbox a
+        # new /etc/machine-id, so keep the first one next to the log and restore it each
+        # boot; Orca then sees its own earlier boot and reclaims the stale lock itself.
+        - command:
+            - sh
+            - -c
+            - >-
+              f=/home/agent/.local/state/orca-serve/machine-id;
+              if [ -s "$f" ]; then cat "$f" >/etc/machine-id;
+              [ ! -e /var/lib/dbus/machine-id ] || cat "$f" >/var/lib/dbus/machine-id;
+              else cp /etc/machine-id "$f"; fi
+          user: "0"
+          description: Keep a stable machine id for Orca's locks
+        # Dotfiles, once per sandbox (skipped when the chezmoi source dir exists). A startup
+        # hook, not install: install hooks of this workload run before the Claude mixin's,
+        # which would then overwrite the ~/.claude/settings.json that chezmoi modifies.
+        # umask 022: hooks run with 002, which chezmoi would bake into the files' modes.
+        # A failure is logged and does not block boot; re-run `chezmoi init --apply` by hand.
+        - command:
+            - sh
+            - -c
+            - >-
+              umask 022;
+              [ -d "$HOME/.local/share/chezmoi" ] ||
+              chezmoi init --apply ynny-github ||
+              echo "chezmoi init --apply ynny-github failed" >&2
+          description: Apply dotfiles with chezmoi on first boot
+        - command:
+            - sh
+            - -c
+            - >-
+              umask 077;
+              unset DISPLAY;
+              export SHELL=/bin/bash;
+              exec orca-ide serve --port ${{ kit.args.port }} --pairing-address ${{ kit.args.pairingAddress }} --json
+              </dev/null >/home/agent/.local/state/orca-serve/serve.log 2>&1
+          background: true
+          description: Start orca-ide serve
