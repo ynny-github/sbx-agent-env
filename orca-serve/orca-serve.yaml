@@ -103,15 +103,18 @@ capabilities:
         # which would then overwrite the ~/.claude/settings.json that chezmoi modifies.
         # umask 022: hooks run with 002, which chezmoi would bake into the files' modes.
         # A failure is logged and does not block boot; re-run `chezmoi init --apply` by hand.
+        # TOBAN=1 opts in to the dotfiles' mise-managed toban. The dotfiles have no run_
+        # scripts, so `mise install` runs here, every boot, to retry anything still missing.
         - command:
             - sh
             - -c
             - >-
               umask 022;
               [ -d "$HOME/.local/share/chezmoi" ] ||
-              chezmoi init --apply ynny-github ||
-              echo "chezmoi init --apply ynny-github failed" >&2
-          description: Apply dotfiles with chezmoi on first boot
+              TOBAN=1 chezmoi init --apply ynny-github ||
+              echo "chezmoi init --apply ynny-github failed" >&2;
+              mise install || echo "mise install failed" >&2
+          description: Apply dotfiles with chezmoi on first boot, then install mise tools
         - command:
             - sh
             - -c
